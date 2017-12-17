@@ -28,7 +28,7 @@ static const float V_BAT_CHARGE = 1.0; // volts
 static const float V_BAT_MAX_NIMH = 1.475; // volts
 static const float V_BAT_MAX = 1.8; // volts
 static const float VOUT_MAX = 4.0; // volts
-static const float VCC = 5.00; // volts
+static const float VCC = 5.04; //4.72; //5.00; // volts
 static const float SHUNT_RESISTOR = 1.8; // ohms
 
 static const byte LED_NONE = 0;
@@ -213,7 +213,8 @@ class BatteryCharger {
           }
   
           case 7: {
-            // 
+            // DEBUG
+            // state = 8; // DEBUG
             if (voltage_vbat > V_BAT_CHARGE + 0.01) {
               // discharging
               state = 20;
@@ -248,8 +249,10 @@ class BatteryCharger {
             SetDischarger(true);
             SetLED(LED_DISCHARGING);
             
-            end_ts = millis() + 18000000; // 5 hours
-            ts = millis() + 5000;
+            start_ts = millis();
+            end_ts = start_ts + 18000000; // 5 hours
+            ts = start_ts + 5000; // 5 seconds
+            
             delay(500);
   
             Serial.println("DEVICE " + (String)iid + ": DISCHARGER ON ");
@@ -281,15 +284,15 @@ class BatteryCharger {
               state = 22;
               break;
             }
-            
+
             if (now_ts > ts) {
               // 
+              //ts = now_ts + 5000;// - (now_ts - ts);
               value_ibat = ReadMultiDecimated(pin_ibat);
               voltage_ibat = GetVoltage(value_ibat, 65536);
               current = (voltage_vbat - voltage_ibat) / SHUNT_RESISTOR;
-              capacity_out += (double)(now_ts - ts) * current / 3600;
-              
-              ts = now_ts + 5000;
+              capacity_out += current * 5.0 / 3.6;
+              ts += 5000;
   
               temperature = ntc.TemperatureC(ReadMultiDecimated(pin_tbat));
               if ((temperature < 10) || (temperature > 40)) {
@@ -301,7 +304,7 @@ class BatteryCharger {
                 break;
               }
 
-              if (current < 0.01) {
+              if (0 && (current < 0.01)) {
                 // abnormally small discharge current
 
                 Serial.println("DEVICE " + (String)iid + ": ABNORMAL DISCHARGE CURRENT: " + (String)current);
@@ -377,9 +380,15 @@ class BatteryCharger {
             SetLED(LED_CHARGING);
             SetCharger(100);
             level_pwm_increment = 32;
-            
-            end_ts = millis() + 54000000; // 15 hours
-            ts = millis() + 5000;
+            current_avg = 0.0f;
+            temperature_slope = 0.0f;
+            temperature_avg = 0.0f;
+            temperature_last = ntc.TemperatureC(ReadMultiDecimated(pin_tbat));
+
+            start_ts = millis();
+            end_ts = start_ts + 54000000; // 15 hours
+            ts = start_ts + 5000;
+            minute_ts = start_ts + 60000;
 
             Serial.println("DEVICE " + (String)iid + ": LOW CURRENT CHARGER ON ");
             
@@ -407,8 +416,8 @@ class BatteryCharger {
             if (0 
               && (voltage_vbat > V_BAT_CHARGE + 0.1) 
               && (temperature >= 10) && (temperature <= 30)) {
-              // fits high current charging
-              // disabled
+              // voltage above critical limit
+              
               Serial.println("DEVICE " + (String)iid + ": FITS HIGH CURRENT CHARGING");
               
               state = 32;
@@ -465,13 +474,28 @@ class BatteryCharger {
               state = 33;
               break;
             }
+
+            if (now_ts > minute_ts) {
+              // time for stats gathering
+              //minute_ts = now_ts + 60000; // - (now_ts - minute_ts);
+              minute_ts += 60000;
+              temperature_slope = temperature_avg - temperature_last;
+              temperature_last = temperature_avg;
+            }
             
             if (now_ts > ts) {
               // time to test current
+              //ts = now_ts + 5000; // - (now_ts - ts);
+              ts += 5000;
+              if (current_avg == 0) {
+                // 
+                current_avg = current;
+              } else {
+                // 
+                current_avg = (11 * current_avg + current) / 12;
+              }
 
-              capacity_in += (double)(now_ts - ts) * current / 3600;
-
-              ts = now_ts + 5000;
+              capacity_in = (double)(now_ts - start_ts) * current_avg / 3600.0;
               
               if ((temperature < 5) || (temperature > 35)) {
                 // abnormal temperature
@@ -480,6 +504,14 @@ class BatteryCharger {
                 
                 state = 33;
                 break;
+              }
+
+              if (temperature_avg == 0) {
+                // 
+                temperature_avg = temperature;
+              } else {
+                // 
+                temperature_avg = (temperature_avg * 11.0 + temperature) / 12.0;
               }
               
               Serial.print("DEVICE " + (String)iid + ": ");
@@ -496,7 +528,9 @@ class BatteryCharger {
               Serial.print(voltage_vbat * current, 6);
               Serial.print(" W; Tbat = ");
               Serial.print(temperature, 6);
-              Serial.print(" degC; Cout = ");
+              Serial.print(" degC; Tslope = ");
+              Serial.print(temperature_slope, 6);
+              Serial.print(" degC/min; Cout = ");
               Serial.print(capacity_in, 6);
               Serial.println(" mAh");
 
@@ -530,13 +564,22 @@ class BatteryCharger {
             delay(1000);
             SetLED(LED_CHARGING);
             temperature_slope = 0.0f;
+            temperature_avg = 0.0f;
+            temperature_last = ntc.TemperatureC(ReadMultiDecimated(pin_tbat));
+            for (byte i = 0; i < TEMPERATURE_SLOPE_SEQUENCE_LENGTH; i ++) {
+              // 
+              temperature_slope_sequence[i] = 0.0f;
+            }
             voltage_max = 0.0f;
             voltage_drop = 0.0f;
-            if (level_pwm == 0) SetCharger(20);
+            SetCharger(level_pwm == 0 ? 200 : level_pwm);
             level_pwm_increment = 32;
-            
-            end_ts = millis() + 18000000; // 5 hours
-            ts = millis() + 5000;
+            current_avg = 0.0f;
+
+            start_ts = millis();
+            end_ts = start_ts + 18000000; // 5 hours
+            ts = start_ts + 5000; // 5 seconds
+            minute_ts = start_ts + 60000; // 1 minute
 
             Serial.println("DEVICE " + (String)iid + ": HIGH CURRENT CHARGER ON ");
             
@@ -620,12 +663,58 @@ class BatteryCharger {
               state = 42;
               break;
             }
+
+            if (now_ts > minute_ts) {
+              // time for stats gathering
+              //minute_ts = now_ts + 60000;// - (now_ts - minute_ts);
+              minute_ts += 60000;
+              temperature_slope = temperature_avg - temperature_last;
+              temperature_last = temperature_avg;
+              
+              bool bCorrectSequence = true;
+              for (byte i = 0; i < TEMPERATURE_SLOPE_SEQUENCE_LENGTH - 1; i ++) {
+                // 
+                if (temperature_slope_sequence[i] > temperature_slope_sequence[i + 1]) {
+                  // 
+                  bCorrectSequence  = false;
+                }
+                if (temperature_slope_sequence[i] <= 0) {
+                  // 
+                  bCorrectSequence  = false;
+                }
+                temperature_slope_sequence[i] = temperature_slope_sequence[i + 1];
+              }
+              temperature_slope_sequence[9] = temperature_slope;
+              
+              if (bCorrectSequence) {
+                // a steady growing temperature slope
+                // consistent with dT end condition
+
+                Serial.println("DEVICE " + (String)iid + ": HIGH CURRENT CHARGING COMPLETE: dT event, Tslope sequence:");
+                for (byte i = 0; i < TEMPERATURE_SLOPE_SEQUENCE_LENGTH - 1; i ++) {
+                  // 
+                  Serial.print(temperature_slope_sequence[i], 6);
+                  Serial.print(", ");
+                }
+                Serial.println(" ");
+                state = 42;
+                break;
+              }
+            }
             
             if (now_ts > ts) {
               // time for more stuff
+              //ts = now_ts + 5000;// - (now_ts - ts);
+              ts += 5000;
+              if (current_avg == 0) {
+                // 
+                current_avg = current;
+              } else {
+                // 
+                current_avg = (11 * current_avg + current) / 12;
+              }
 
-              capacity_in += (double)(now_ts - ts) * current / 3600;
-              ts = millis() + 5000;
+              capacity_in = (double)(now_ts - start_ts) * current_avg / 3600;
               
               if (temperature > 40) {
                 // temperature too high for high current charging
@@ -652,11 +741,13 @@ class BatteryCharger {
               // 
               voltage_drop = (voltage_drop * 11 + (voltage_max - voltage_vbat)) / 12;
 
-              if (temperature_last > 0) {
-                //
-                temperature_slope = (temperature_slope * 11 + (temperature - temperature_last)) / 12;
+              if (temperature_avg == 0) {
+                // 
+                temperature_avg = temperature;
+              } else {
+                // 
+                temperature_avg = (temperature_avg * 11.0 + temperature) / 12.0;
               }
-              temperature_last = temperature;
 
               if (voltage_drop >= 0.01) {
                 // -dV end condition
@@ -835,6 +926,9 @@ class BatteryCharger {
         }
       }
     }
+
+    /// temperature slope sequence length
+    static const byte TEMPERATURE_SLOPE_SEQUENCE_LENGTH = 10;
     
     /// state
     unsigned char state = 0;
@@ -847,11 +941,13 @@ class BatteryCharger {
     /// end-charging primary variables
     double voltage_max = 0.0f, temperature_last = 0.0f;
     /// end-charging secondary variables
-    double temperature_slope = 0.0f, voltage_drop = 0.0f;
+    double temperature_slope = 0.0f, temperature_avg = 0.0f, voltage_drop = 0.0f;
+    /// temperature slope sequence
+    double temperature_slope_sequence[TEMPERATURE_SLOPE_SEQUENCE_LENGTH];
     /// measured temperature
     double temperature = 0.0f;
     /// determined shunt current
-    double current = 0.0f;
+    double current = 0.0f, current_avg = 0.0f;
     /// determined powers
     double capacity_in = 0.0f, capacity_out = 0.0f;
     /// input Vbat, Ibat, Tbat pins
@@ -863,7 +959,7 @@ class BatteryCharger {
     /// LED state
     bool LEDon = false;
     /// timestamps
-    unsigned long now_ts = 0, end_ts = 0, ts = 0, LED_ts = 0;
+    unsigned long now_ts = 0, start_ts = 0, end_ts = 0, ts = 0, minute_ts = 0, LED_ts = 0;
     /// pwm level
     unsigned int level_pwm = 0;
     /// pwm level increment
@@ -888,8 +984,8 @@ void setup() {
   pinMode(I_BAT1, INPUT);
   for (int i = 2; i <= 13; i ++) {
     // 
-    pinMode(i, OUTPUT);
-    digitalWrite(i, LOW);
+      pinMode(i, OUTPUT);
+      digitalWrite(i, LOW);
   }
   digitalWrite(A4, LOW);
   digitalWrite(A5, LOW);
@@ -907,6 +1003,7 @@ void setup() {
 
 void loop() {
   // 
+
   charger_0.Execute();
   charger_1.Execute();
 }
